@@ -2937,6 +2937,14 @@ const uint8_t PROGMEM frame41[1024] = {
 #define BUTTON_PIN 27
 #define HOLD_TO_MENU_MS 800
 
+// LED wiring: use a 220-330 ohm resistor in series with each LED.
+#define LED1_PIN 25
+#define LED2_PIN 32
+#define LED_BRIGHTNESS 35   // 0-255; keep the LEDs dim
+
+const float TEMP_THRESHOLD = 29.0;
+const unsigned long SENSOR_INTERVAL_MS = 2000UL; // DHT22 should not be read too quickly
+
 const uint8_t* const animationFrames[] = {
   frame0, frame1, frame2, frame3, frame4, frame5, frame6,
   frame7, frame8, frame9, frame10, frame11, frame12, frame13,
@@ -2946,6 +2954,11 @@ const uint8_t* const animationFrames[] = {
   frame35, frame36, frame37, frame38, frame39, frame40, frame41
 };
 const uint8_t animationFrameCount = sizeof(animationFrames) / sizeof(animationFrames[0]);
+
+enum ScreenMode {
+  MENU_MODE,
+  LIVE_MODE
+};
 
 void showMenuScreen() {
   display.clearDisplay();
@@ -2962,158 +2975,157 @@ void showMenuScreen() {
   display.display();
 }
 
-// Returns true if the button is held long enough to return to the menu.
-bool holdToMenuDuringWork() {
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    unsigned long pressedAt = millis();
-    while (digitalRead(BUTTON_PIN) == LOW) {
-      if (millis() - pressedAt >= HOLD_TO_MENU_MS) {
-        // Wait for release so the same hold is not detected repeatedly.
-        while (digitalRead(BUTTON_PIN) == LOW) delay(5);
-        delay(35);
-        showMenuScreen();
-        return true;
-      }
-      delay(5);
+// Returns true after a continuous hold. The button is released before returning.
+bool buttonHeldToMenu() {
+  if (digitalRead(BUTTON_PIN) != LOW) return false;
+
+  unsigned long pressedAt = millis();
+  while (digitalRead(BUTTON_PIN) == LOW) {
+    if (millis() - pressedAt >= HOLD_TO_MENU_MS) {
+      while (digitalRead(BUTTON_PIN) == LOW) delay(5);
+      delay(35);
+      return true;
     }
-    delay(35); // debounce release
+    delay(5);
   }
+  delay(35); // debounce a short press
   return false;
 }
 
-// Play the original 42-frame animation. A long hold aborts it to the menu.
+// Play the original 42 frames. Holding the button during the animation
+// cancels the transition and returns to the menu.
 bool playAnimation() {
   for (uint8_t i = 0; i < animationFrameCount; i++) {
-    if (holdToMenuDuringWork()) return false;
+    if (buttonHeldToMenu()) return false;
+
     display.clearDisplay();
-    display.drawBitmap(0, 0, animationFrames[i], SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+    display.drawBitmap(0, 0, animationFrames[i],
+                       SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
     display.display();
+
     unsigned long frameStarted = millis();
-    while (millis() - frameStarted < 67) {
-      if (holdToMenuDuringWork()) return false;
+    while (millis() - frameStarted < 67UL) {
+      if (buttonHeldToMenu()) return false;
       delay(2);
     }
   }
   return true;
 }
 
-void showScanningScreen() {
+void updateLeds(float temperature1, float temperature2) {
+  // A sensor error (NaN) keeps its LED off.
+  analogWrite(LED1_PIN,
+              (!isnan(temperature1) && temperature1 >= TEMP_THRESHOLD)
+                ? LED_BRIGHTNESS : 0);
+  analogWrite(LED2_PIN,
+              (!isnan(temperature2) && temperature2 >= TEMP_THRESHOLD)
+                ? LED_BRIGHTNESS : 0);
+}
+
+void showLiveReadings(float temperature1, float humidity1,
+                      float temperature2, float humidity2) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
+  display.setTextSize(1);
+
   display.setCursor(0, 0);
-  display.println(F("SYSTEMS"));
-  display.drawLine(0, 18, 127, 18, SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 25);
-  display.println(F("Temperature system"));
-  display.setCursor(0, 37);
-  display.println(F("Humidity system"));
-  display.setCursor(0, 52);
-  display.println(F("Scanning for 10 sec..."));
+  display.println(F("LIVE TEMPERATURE"));
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
+  display.setCursor(0, 16);
+  display.print(F("DHT1 T: "));
+  if (isnan(temperature1)) display.print(F("ERR"));
+  else { display.print(temperature1, 1); display.print(F(" C")); }
+
+  display.setCursor(0, 27);
+  display.print(F("     H: "));
+  if (isnan(humidity1)) display.print(F("ERR"));
+  else { display.print(humidity1, 1); display.print(F(" %")); }
+
+  display.setCursor(0, 39);
+  display.print(F("DHT2 T: "));
+  if (isnan(temperature2)) display.print(F("ERR"));
+  else { display.print(temperature2, 1); display.print(F(" C")); }
+
+  display.setCursor(0, 50);
+  display.print(F("     H: "));
+  if (isnan(humidity2)) display.print(F("ERR"));
+  else { display.print(humidity2, 1); display.print(F(" %")); }
+
+  display.setCursor(0, 59);
+  display.print(F("Hold button: Menu"));
   display.display();
 }
 
-void showReadings(float temp1, float hum1, float temp2, float hum2) {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println(F("SENSOR RESULTS"));
-  display.drawLine(0, 11, 127, 11, SSD1306_WHITE);
-
-  display.setCursor(0, 17);
-  display.print(F("DHT22 #1  T:"));
-  if (isnan(temp1)) display.print(F("ERR"));
-  else { display.print(temp1, 1); display.print(F("C")); }
-  display.print(F(" H:"));
-  if (isnan(hum1)) display.print(F("ERR"));
-  else { display.print(hum1, 1); display.print(F("%")); }
-
-  display.setCursor(0, 34);
-  display.print(F("DHT22 #2  T:"));
-  if (isnan(temp2)) display.print(F("ERR"));
-  else { display.print(temp2, 1); display.print(F("C")); }
-  display.print(F(" H:"));
-  if (isnan(hum2)) display.print(F("ERR"));
-  else { display.print(hum2, 1); display.print(F("%")); }
-
-  display.setCursor(0, 56);
-  display.print(F("Press to scan again"));
-  display.display();
-}
-
-void showSensorError() {
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 8);
-  display.println(F("DHT22 read failed!"));
-  display.println();
-  display.println(F("Check sensor wiring"));
-  display.println();
-  display.println(F("Press to try again"));
-  display.display();
-}
-
-// Wait on the menu for a short button press. A long hold on the menu
-// is ignored; a short press starts the scan sequence.
-bool waitForMenuStart() {
-  while (digitalRead(BUTTON_PIN) == HIGH) delay(5);
-  unsigned long pressedAt = millis();
-  while (digitalRead(BUTTON_PIN) == LOW) delay(5);
-  unsigned long heldFor = millis() - pressedAt;
-  delay(35);
-  return heldFor < HOLD_TO_MENU_MS;
-}
-
-// After results appear, a short press scans again; a long hold returns to menu.
-// Returns true when the user requests the menu.
-bool waitForResultAction() {
-  while (digitalRead(BUTTON_PIN) == HIGH) delay(5);
-  unsigned long pressedAt = millis();
-  while (digitalRead(BUTTON_PIN) == LOW) delay(5);
-  unsigned long heldFor = millis() - pressedAt;
-  delay(35);
-  return heldFor >= HOLD_TO_MENU_MS;
-}
-
-// Returns false if a long button hold requested the menu.
-bool runScanCycle() {
-  if (!playAnimation()) return false;
-
-  showScanningScreen();
-  unsigned long scanStarted = millis();
-  while (millis() - scanStarted < 10000UL) {
-    if (holdToMenuDuringWork()) return false;
-    delay(5);
-  }
-
-  // Take one snapshot from each DHT22 after the 10-second scan.
+void readSensorsAndUpdate() {
   float humidity1 = dht1.readHumidity();
   float temperature1 = dht1.readTemperature();
   float humidity2 = dht2.readHumidity();
   float temperature2 = dht2.readTemperature();
 
+  updateLeds(temperature1, temperature2);
+  showLiveReadings(temperature1, humidity1, temperature2, humidity2);
+
   Serial.print(F("DHT22 #1 - T: "));
-  if (isnan(temperature1)) Serial.print(F("ERR")); else Serial.print(temperature1, 1);
+  if (isnan(temperature1)) Serial.print(F("ERR"));
+  else Serial.print(temperature1, 1);
   Serial.print(F(" C | H: "));
-  if (isnan(humidity1)) Serial.print(F("ERR")); else Serial.print(humidity1, 1);
+  if (isnan(humidity1)) Serial.print(F("ERR"));
+  else Serial.print(humidity1, 1);
   Serial.println(F(" %"));
 
   Serial.print(F("DHT22 #2 - T: "));
-  if (isnan(temperature2)) Serial.print(F("ERR")); else Serial.print(temperature2, 1);
+  if (isnan(temperature2)) Serial.print(F("ERR"));
+  else Serial.print(temperature2, 1);
   Serial.print(F(" C | H: "));
-  if (isnan(humidity2)) Serial.print(F("ERR")); else Serial.print(humidity2, 1);
+  if (isnan(humidity2)) Serial.print(F("ERR"));
+  else Serial.print(humidity2, 1);
   Serial.println(F(" %"));
+}
 
-  showReadings(temperature1, humidity1, temperature2, humidity2);
-  return true;
+// Live mode continuously refreshes both DHT22 readings.
+// A short press is ignored; holding for 800 ms exits to the menu.
+void runLiveMonitor() {
+  unsigned long lastSensorRead = 0;
+  bool firstRead = true;
+
+  while (true) {
+    if (buttonHeldToMenu()) {
+      // The long press exits live mode. The caller plays the transition back.
+      return;
+    }
+
+    if (firstRead || millis() - lastSensorRead >= SENSOR_INTERVAL_MS) {
+      readSensorsAndUpdate();
+      lastSensorRead = millis();
+      firstRead = false;
+    }
+
+    delay(5);
+  }
+}
+
+// Menu waits for a short press. A hold on the menu does not start monitoring.
+bool waitForMenuStart() {
+  while (digitalRead(BUTTON_PIN) == HIGH) delay(5);
+
+  unsigned long pressedAt = millis();
+  while (digitalRead(BUTTON_PIN) == LOW) delay(5);
+  unsigned long heldFor = millis() - pressedAt;
+  delay(35);
+
+  return heldFor < HOLD_TO_MENU_MS;
 }
 
 void setup() {
   Serial.begin(115200);
+
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+  analogWrite(LED1_PIN, 0);
+  analogWrite(LED2_PIN, 0);
+
   Wire.begin(OLED_SDA, OLED_SCL);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDR)) {
@@ -3123,6 +3135,7 @@ void setup() {
 
   dht1.begin();
   dht2.begin();
+
   display.setRotation(0);
   display.clearDisplay();
   display.display();
@@ -3130,16 +3143,11 @@ void setup() {
 }
 
 void loop() {
-  // Main menu: short press starts. Long hold does not start a scan.
   if (waitForMenuStart()) {
-    bool completed = runScanCycle();
-    while (completed) {
-      // Keep the results frozen until the next button action.
-      if (waitForResultAction()) {
-        showMenuScreen();
-        break;
-      }
-      completed = runScanCycle(); // short press = scan again
+    if (playAnimation()) {
+      runLiveMonitor();
+      // Return animation is the transition from the live monitor to the menu.
+      playAnimation();
     }
     showMenuScreen();
   }
